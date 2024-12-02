@@ -1,0 +1,111 @@
+# add Clickhouse
+- name: Install Clickhouse
+  hosts: clickhouse
+  handlers:
+    - name: Start clickhouse service
+      become: true
+      ansible.builtin.service:
+        name: clickhouse-server
+        state: restarted
+  tasks:
+    - block:
+        - name: Get clickhouse distrib
+          ansible.builtin.get_url:
+            url: "https://packages.clickhouse.com/rpm/stable/{{ item }}-{{ clickhouse_version }}.noarch.rpm"
+            dest: "./{{ item }}-{{ clickhouse_version }}.rpm"
+          with_items: "{{ clickhouse_packages }}"
+      rescue:
+        - name: Get clickhouse distrib
+          ansible.builtin.get_url:
+            url: "https://packages.clickhouse.com/rpm/stable/clickhouse-common-static-{{ clickhouse_version }}.x86_64.rpm"
+            dest: "./clickhouse-common-static-{{ clickhouse_version }}.rpm"
+    - name: Install clickhouse packages
+      become: true
+      ansible.builtin.yum:
+        name:
+          - clickhouse-common-static-{{ clickhouse_version }}.rpm
+          - clickhouse-client-{{ clickhouse_version }}.rpm
+          - clickhouse-server-{{ clickhouse_version }}.rpm
+        disable_gpg_check: true
+      notify: Start clickhouse service
+    - name: Flush handlers
+      meta: flush_handlers
+    - name: Create database
+      ansible.builtin.command: "clickhouse-client -q 'create database logs;'"
+      register: create_db
+      failed_when: create_db.rc != 0 and create_db.rc !=82
+      changed_when: create_db.rc == 0
+
+# add vector
+
+- name: Install and configure Vector
+  hosts: vector
+  become: true
+  handlers:
+    - name: Restart vector service
+      ansible.builtin.service:
+        name: vector
+        state: restarted
+  tasks:
+    - name: Create vector group
+      group:
+        name: vector
+        state: present
+
+    - name: Create vector user
+      user:
+        name: vector
+        groups: vector
+        shell: /sbin/nologin
+        append: true
+        state: present
+        create_home: false
+
+    - name: Ensure data directory for Vector exists
+      ansible.builtin.file:
+        path: /var/lib/vector
+        state: directory
+        owner: vector
+        group: vector
+        mode: '0755'
+
+    - name: Ensure vector directory exists
+      ansible.builtin.file:
+        path: "/etc/vector"
+        state: directory
+        owner: vector
+        group: vector
+        mode: "0755"
+
+    - name: Download vector distribution
+      ansible.builtin.get_url:
+        url: "https://packages.timber.io/vector/{{ vector_version }}/vector-{{ vector_version }}-x86_64-unknown-linux-gnu.tar.gz"
+        dest: "./vector-{{ vector_version }}.tar.gz"
+
+    - name: Extract vector archive
+      ansible.builtin.unarchive:
+        src: "./vector-{{ vector_version }}.tar.gz"
+        dest: "/etc/vector"
+        extra_opts:
+          - "--strip-components=2"
+        remote_src: true
+
+    - name: Deploy vector configuration
+      ansible.builtin.template:
+        src: vector.j2
+        dest: /etc/vector/vector.yaml
+        mode: "0644"
+        validate: /etc/vector/bin/vector validate --no-environment --config-yaml %s
+
+    - name: Install vector as service
+      ansible.builtin.template:
+        src: vector.service.j2
+        dest: /etc/systemd/system/vector.service
+        mode: "0644"
+      notify: Restart vector service
+
+    - name: Add a path to system-wide $PATH.
+      ansible.builtin.copy:
+        dest: /etc/profile.d/custom-path.sh
+        content: 'PATH=$PATH:/etc/vector/bin/'
+        mode: "0644"
